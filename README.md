@@ -43,6 +43,12 @@ People use ralph loops for:
 
 ## Install
 
+Requires Node.js 22.22.1 or later and `@earendil-works/pi-coding-agent` 0.85.1 or later. The deprecated `@mariozechner/pi-coding-agent` package is no longer supported. Upgrade Pi before installing this version of Ralph:
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.85.1
+```
+
 ```bash
 pi install npm:@lnilluv/pi-ralph-loop
 ```
