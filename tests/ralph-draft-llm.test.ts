@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   buildDraftRequest,
   buildRepoContext,
@@ -84,6 +84,7 @@ function makeRuntime(overrides: Partial<StrengthenDraftRuntime> = {}): Strengthe
   };
 
   const modelRegistry: StrengthenDraftRuntime["modelRegistry"] = {
+    async complete() { throw new Error("unexpected completion"); },
     async getApiKeyAndHeaders() {
       return { ok: true, apiKey: "test-api-key", headers: { "x-test": "1" } };
     },
@@ -251,6 +252,22 @@ test("buildStrengtheningPrompt redacts secret-bearing target paths", () => {
   }
 });
 
+test("strengthenDraftWithLlm uses the host registry completion with its receiver", async () => {
+  const request = makeRequest();
+  const runtime = makeRuntime();
+  let called = false;
+  let forwardedCredentials = false;
+  runtime.modelRegistry.complete = async function (_model, _context, options) {
+    assert.equal(this, runtime.modelRegistry);
+    called = true;
+    forwardedCredentials = Object.hasOwn(options ?? {}, "apiKey") || Object.hasOwn(options ?? {}, "headers");
+    return makeAssistantMessage([{ type: "text", text: "invalid draft" }]);
+  };
+  assert.deepEqual(await strengthenDraftWithLlm(request, runtime), { kind: "fallback" });
+  assert.equal(called, true);
+  assert.equal(forwardedCredentials, false, "the host must resolve full provider auth metadata");
+});
+
 test("strengthenDraftWithLlm falls back when the selected model is missing", async () => {
   const request = makeRequest();
   const result = await strengthenDraftWithLlm(request, makeRuntime({ model: undefined }), {
@@ -266,6 +283,7 @@ test("strengthenDraftWithLlm falls back when auth lookup fails", async () => {
   const request = makeRequest();
   const runtime = makeRuntime({
     modelRegistry: {
+      async complete() { throw new Error("unexpected completion"); },
       async getApiKeyAndHeaders() {
         return { ok: false, error: "no auth" };
       },
@@ -281,22 +299,25 @@ test("strengthenDraftWithLlm falls back when auth lookup fails", async () => {
   assert.deepEqual(result, { kind: "fallback" });
 });
 
-test("strengthenDraftWithLlm falls back when auth succeeds but apiKey is missing", async () => {
+test("strengthenDraftWithLlm accepts successful header-only auth", async () => {
   const request = makeRequest();
   const runtime = makeRuntime({
     modelRegistry: {
+      async complete() { throw new Error("unexpected completion"); },
       async getApiKeyAndHeaders() {
         return { ok: true, headers: { "x-test": "1" } };
       },
     },
   });
-
+  let called = false;
   const result = await strengthenDraftWithLlm(request, runtime, {
     completeImpl: async () => {
-      throw new Error("should not be called");
+      called = true;
+      return makeAssistantMessage([{ type: "text", text: "invalid draft" }]);
     },
   });
 
+  assert.equal(called, true);
   assert.deepEqual(result, { kind: "fallback" });
 });
 

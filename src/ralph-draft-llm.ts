@@ -1,4 +1,5 @@
-import { complete, type Api, type AssistantMessage, type Context, type Model } from "@mariozechner/pi-ai";
+import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
 import { filterSecretBearingTopLevelNames } from "./secret-paths.ts";
 import {
@@ -17,15 +18,13 @@ export const DRAFT_LLM_TIMEOUT_MS = 20_000;
 
 export type StrengthenDraftRuntime = {
   model: Model<Api> | undefined;
-  modelRegistry: {
-    getApiKeyAndHeaders(model: Model<Api>): Promise<AuthResult | AuthFailure>;
-  };
+  modelRegistry: Pick<ModelRegistry, "getApiKeyAndHeaders" | "complete">;
 };
 
 export type StrengthenDraftOptions = {
   scope?: DraftStrengtheningScope;
   timeoutMs?: number;
-  completeImpl?: typeof complete;
+  completeImpl?: ModelRegistry["complete"];
 };
 
 export type StrengthenDraftResult =
@@ -36,17 +35,6 @@ export type StrengthenDraftResult =
   | {
       kind: "fallback";
     };
-
-type AuthResult = {
-  ok: true;
-  apiKey?: string;
-  headers?: Record<string, string>;
-};
-
-type AuthFailure = {
-  ok: false;
-  error?: string;
-};
 
 type CompleteOutcome =
   | {
@@ -213,8 +201,6 @@ async function runCompleteWithTimeout(
   model: NonNullable<StrengthenDraftRuntime["model"]>,
   prompt: Context,
   options: Required<Pick<StrengthenDraftOptions, "timeoutMs" | "completeImpl">>,
-  apiKey: string,
-  headers?: Record<string, string>,
 ): Promise<CompleteOutcome> {
   const abortController = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -222,8 +208,6 @@ async function runCompleteWithTimeout(
   const completion = Promise.resolve()
     .then(() =>
       options.completeImpl(model, prompt, {
-        apiKey,
-        headers,
         signal: abortController.signal,
         temperature: 0,
       }),
@@ -256,7 +240,7 @@ export async function strengthenDraftWithLlm(
     if (!model) return { kind: "fallback" };
 
     const authResult = await runtime.modelRegistry.getApiKeyAndHeaders(model);
-    if (!authResult.ok || !authResult.apiKey) return { kind: "fallback" };
+    if (!authResult.ok) return { kind: "fallback" };
 
     const scope = options.scope ?? "body-only";
     const prompt = buildStrengtheningPrompt(request, scope);
@@ -265,10 +249,8 @@ export async function strengthenDraftWithLlm(
       prompt,
       {
         timeoutMs: options.timeoutMs ?? DRAFT_LLM_TIMEOUT_MS,
-        completeImpl: options.completeImpl ?? complete,
+        completeImpl: options.completeImpl ?? runtime.modelRegistry.complete.bind(runtime.modelRegistry),
       },
-      authResult.apiKey,
-      authResult.headers,
     );
 
     if (completion.kind !== "message") return { kind: "fallback" };

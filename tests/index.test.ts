@@ -3479,6 +3479,7 @@ test("/ralph-draft passes the active model runtime to the draft planner", async 
       maxTokens: 8_192,
     },
     modelRegistry: {
+      async complete() { throw new Error("unexpected completion"); },
       async getApiKeyAndHeaders(model) {
         assert.equal(model.id, "claude-sonnet-4-5");
         return { ok: true, apiKey: "active-api-key", headers: { "x-runtime": "1" } };
