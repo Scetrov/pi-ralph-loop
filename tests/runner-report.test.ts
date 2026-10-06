@@ -76,6 +76,30 @@ test("generateStaticRunnerReport renders an operator dossier instead of a generi
   assert.ok(html.indexOf("Operator summary") < html.indexOf("Raw evidence vault"));
 });
 
+test("generateStaticRunnerReport names OpenSpec tasks checked off", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ralph-report-openspec-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ status: "max-iterations" }), "utf8");
+  writeFileSync(join(dir, "iterations.jsonl"), JSON.stringify({
+    iteration: 1,
+    status: "complete",
+    progress: true,
+    changedFiles: [],
+    openspec: {
+      before: { total: 7, complete: 1, remaining: 6 },
+      after: { total: 7, complete: 3, remaining: 4 },
+      checkedOff: ["3.2 write parser", "3.3 wire the gate<script>"],
+    },
+  }) + "\n", "utf8");
+  writeFileSync(join(dir, "events.jsonl"), "", "utf8");
+
+  const html = readFileSync(generateStaticRunnerReport(dir).reportPath, "utf8");
+  assert.match(html, /OpenSpec/);
+  assert.match(html, /3\.2 write parser; 3\.3 wire the gate&lt;script&gt;/);
+  assert.match(html, /1\/7 → 3\/7/);
+  assert.doesNotMatch(html, /3\.3 wire the gate<script>/);
+});
+
 test("generateStaticRunnerReport renders stopped runs as operator-stopped", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ralph-report-stopped-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

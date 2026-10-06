@@ -87,6 +87,52 @@ test("buildRalphRunSummary summarizes durable Ralph artifacts deterministically"
   }
 });
 
+test("buildRalphRunSummary names OpenSpec tasks checked off in an iteration", () => {
+  const taskDir = createTempDir();
+  try {
+    mkdirSync(join(taskDir, ".ralph-runner"), { recursive: true });
+    writeFileSync(join(taskDir, "RALPH.md"), "---\nmax_iterations: 1\ntimeout: 60\ncommands: []\n---\n# Task\n", "utf8");
+    writeStatusFile(taskDir, {
+      loopToken: "loop-openspec",
+      ralphPath: join(taskDir, "RALPH.md"),
+      taskDir,
+      cwd: taskDir,
+      status: "max-iterations",
+      currentIteration: 1,
+      maxIterations: 1,
+      timeout: 60,
+      startedAt: "2026-05-03T10:00:00.000Z",
+      completedAt: "2026-05-03T10:01:00.000Z",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+    });
+    appendIterationRecord(taskDir, {
+      iteration: 1,
+      status: "complete",
+      startedAt: "2026-05-03T10:00:00.000Z",
+      completedAt: "2026-05-03T10:01:00.000Z",
+      durationMs: 1000,
+      progress: true,
+      changedFiles: [],
+      noProgressStreak: 0,
+      loopToken: "loop-openspec",
+      openspec: {
+        change: "add-widget",
+        tasksPath: "tasks.md",
+        before: { total: 7, complete: 1, remaining: 6 },
+        after: { total: 7, complete: 3, remaining: 4 },
+        checkedOff: ["3.2 write parser", "3.3 wire the gate"],
+      },
+    });
+
+    const summary = buildRalphRunSummary(taskDir);
+    assert.match(summary, /openspecCheckedOff=3\.2 write parser; 3\.3 wire the gate/);
+    assert.match(summary, /openspecBefore=1\/7 remaining=6/);
+    assert.match(summary, /openspecAfter=3\/7 remaining=4/);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
 test("buildRalphRunSummary filters stale artifacts to current loop token", () => {
   const taskDir = createTempDir();
   try {

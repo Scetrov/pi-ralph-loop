@@ -2997,3 +2997,352 @@ echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"te
   }
 });
 
+function writeMockAgent(taskDir: string, body: string): string {
+  const scriptPath = join(taskDir, "mock-pi.sh");
+  writeFileSync(scriptPath, `#!/bin/bash\nread line\n${body}\n`, { mode: 0o755 });
+  return scriptPath;
+}
+
+function readTranscripts(taskDir: string): string {
+  const dir = join(taskDir, ".ralph-runner", "transcripts");
+  return readdirSync(dir).map((name) => readFileSync(join(dir, name), "utf8")).join("\n");
+}
+
+const agentDone = `echo '{"type":"response","command":"prompt","success":true}'
+echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"working"}]}]}'`;
+const agentPromise = `echo '{"type":"response","command":"prompt","success":true}'
+echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"<promise>DONE</promise>"}]}]}'`;
+
+test("runRalphLoop records one OpenSpec checkoff and does not warn for completing only one task", async () => {
+  const taskDir = createTempDir();
+  try {
+    const tasksPath = join(taskDir, "tasks.md");
+    writeFileSync(tasksPath, "- [ ] 3.2 write parser\n- [ ] 3.3 wire the gate\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_tasks: "tasks.md",
+    }));
+    writeFileSync(join(taskDir, "OPEN_QUESTIONS.md"), "# Open questions\n\nAll clear.\n", "utf8");
+    const scriptPath = writeMockAgent(taskDir, `printf '%s\n' '- [x] 3.2 write parser' '- [ ] 3.3 wire the gate' > ${JSON.stringify(tasksPath)}\n${agentDone}`);
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.equal(result.iterations[0]?.progress, true);
+    assert.deepEqual(result.iterations[0]?.openspec?.checkedOff, ["3.2 write parser"]);
+    assert.equal(result.iterations[0]?.openspec?.warning, undefined);
+    assert.equal(result.iterations[0]?.status, "complete");
+    assert.match(readTranscripts(taskDir), /\[openspec\]/);
+    assert.match(readTranscripts(taskDir), /OpenSpec checked off: 3\.2 write parser/);
+    assert.match(readTranscripts(taskDir), /OpenSpec counts: 0\/2 -> 1\/2/);
+    assert.match(readTranscripts(taskDir), /0\/2/);
+    assert.match(readTranscripts(taskDir), /Attempt more than one remaining task/);
+    assert.match(readTranscripts(taskDir), /Do not archive the change/);
+    assert.doesNotMatch(readTranscripts(taskDir), /at most 1 items/);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop names several OpenSpec checkoffs and ignores code-only edits", async () => {
+  const taskDir = createTempDir();
+  try {
+    const tasksPath = join(taskDir, "tasks.md");
+    writeFileSync(tasksPath, "- [ ] 3.2 write parser\n- [ ] 3.3 wire the gate\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_tasks: "tasks.md",
+    }));
+    const scriptPath = writeMockAgent(taskDir, `printf '%s\n' '- [x] 3.2 write parser' '- [x] 3.3 wire the gate' > ${JSON.stringify(tasksPath)}\nmkdir -p ${JSON.stringify(join(taskDir, "src"))}\nprintf '%s\n' 'export const x = 1;' > ${JSON.stringify(join(taskDir, "src", "parser.ts"))}\n${agentDone}`);
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.equal(result.iterations[0]?.progress, true);
+    assert.deepEqual(result.iterations[0]?.openspec?.checkedOff, ["3.2 write parser", "3.3 wire the gate"]);
+    assert.ok(result.iterations[0]?.changedFiles.includes("src/parser.ts"));
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop warns and continues when no OpenSpec task is checked off, even if code changes", async () => {
+  const taskDir = createTempDir();
+  try {
+    writeFileSync(join(taskDir, "tasks.md"), "- [ ] 3.2 write parser\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 2,
+      completion_promise: "DONE",
+      openspec_tasks: "tasks.md",
+    }));
+    const scriptPath = writeMockAgent(taskDir, `printf '%s\n' 'export const x = 1;' > ${JSON.stringify(join(taskDir, "edited.ts"))}\n${agentDone}`);
+    const notifications: string[] = [];
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 2,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      onNotify(message) {
+        notifications.push(message);
+      },
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.equal(result.status === "complete", false);
+    assert.equal(result.iterations.length, 2);
+    assert.equal(result.iterations[0]?.progress, false);
+    assert.equal(result.iterations[0]?.status, "complete");
+    assert.deepEqual(result.iterations[0]?.openspec?.checkedOff, []);
+    assert.ok(result.iterations[0]?.changedFiles.includes("edited.ts"));
+    assert.match(result.iterations[0]?.openspec?.warning ?? "", /No OpenSpec task was checked off/);
+    assert.ok(notifications.some((message) => message.includes("No OpenSpec task was checked off")));
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop warns when an OpenSpec checkoff is reworded and uses unknown progress when the ledger cannot be read", async () => {
+  const rewordedDir = createTempDir();
+  const missingDir = createTempDir();
+  try {
+    const tasksPath = join(rewordedDir, "tasks.md");
+    writeFileSync(tasksPath, "- [ ] old name\n", "utf8");
+    const rewordedPath = writeRalphMd(rewordedDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_tasks: "tasks.md",
+    }));
+    const rewordedScript = writeMockAgent(rewordedDir, `printf '%s\n' '- [x] new name' > ${JSON.stringify(tasksPath)}\n${agentDone}`);
+    const reworded = await runRalphLoop({
+      ralphPath: rewordedPath,
+      cwd: rewordedDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [rewordedScript],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+    assert.equal(reworded.iterations[0]?.progress, true);
+    assert.deepEqual(reworded.iterations[0]?.openspec?.checkedOff, []);
+    assert.match(reworded.iterations[0]?.openspec?.warning ?? "", /could not be matched by description/);
+    assert.equal(reworded.iterations[0]?.openspec?.before?.complete, 0);
+    assert.equal(reworded.iterations[0]?.openspec?.after?.complete, 1);
+
+    const missingPath = writeRalphMd(missingDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_tasks: "missing-tasks.md",
+    }));
+    const missingScript = writeMockAgent(missingDir, `printf '%s\n' 'code' > ${JSON.stringify(join(missingDir, "edited.ts"))}\n${agentDone}`);
+    const missing = await runRalphLoop({
+      ralphPath: missingPath,
+      cwd: missingDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [missingScript],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+    assert.equal(missing.iterations[0]?.progress, "unknown");
+    assert.deepEqual(missing.iterations[0]?.openspec?.checkedOff, []);
+    assert.match(missing.iterations[0]?.openspec?.warning ?? "", /could not be read/);
+    assert.equal(missing.iterations[0]?.noProgressStreak, 0);
+    assert.ok(missing.iterations[0]?.changedFiles.includes("edited.ts"));
+    assert.notEqual(missing.status, "complete");
+  } finally {
+    rmSync(rewordedDir, { recursive: true, force: true });
+    rmSync(missingDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop stops on a promise only when the OpenSpec ledger is finished", async () => {
+  const taskDir = createTempDir();
+  try {
+    writeFileSync(join(taskDir, "tasks.md"), "- [x] one\n- [x] two\n- [x] three\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 2,
+      completion_promise: "DONE",
+      completion_gate: "disabled",
+      required_outputs: ["ARCHITECTURE.md"],
+      openspec_tasks: "tasks.md",
+    }));
+    const scriptPath = writeMockAgent(taskDir, agentPromise);
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 2,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.iterations.length, 1);
+    assert.equal(result.iterations[0]?.completionGate?.ready, true);
+    assert.equal(result.iterations[0]?.completionGate?.reasons.includes("Missing OPEN_QUESTIONS.md"), false);
+    assert.equal(result.iterations[0]?.completionGate?.reasons.includes("Missing required output: ARCHITECTURE.md"), false);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop continues after a promise when OpenSpec tasks remain, including a disabled gate", async () => {
+  const taskDir = createTempDir();
+  try {
+    writeFileSync(join(taskDir, "tasks.md"), "- [x] one\n- [ ] two\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 2,
+      completion_promise: "DONE",
+      completion_gate: "disabled",
+      required_outputs: ["ARCHITECTURE.md"],
+      openspec_tasks: "tasks.md",
+      commands: [{ name: "echo", run: "echo hi", timeout: 1 }],
+    }));
+    const scriptPath = writeMockAgent(taskDir, agentPromise);
+    let commandCalls = 0;
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 2,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      runCommandsFn: async () => {
+        commandCalls += 1;
+        return [];
+      },
+      pi: makeMockPi(),
+    });
+
+    assert.notEqual(result.status, "complete");
+    assert.equal(result.iterations.length, 2);
+    assert.equal(result.iterations[0]?.completionGate?.ready, false);
+    assert.match(result.iterations[0]?.completionGate?.reasons.join(" ") ?? "", /not finished/);
+    assert.equal(result.iterations[0]?.completionGate?.reasons.includes("Missing OPEN_QUESTIONS.md"), false);
+    assert.equal(result.iterations[0]?.completionGate?.reasons.includes("Missing required output: ARCHITECTURE.md"), false);
+    assert.match(readTranscripts(taskDir), /OpenSpec ledger is not ready to stop/);
+    assert.equal(commandCalls, 2);
+    assert.equal(readRunnerEvents(taskDir).some((event) => event.type === "completion.acceptance.checked"), false);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop does not stop early when the OpenSpec ledger is already finished without a promise", async () => {
+  const taskDir = createTempDir();
+  try {
+    writeFileSync(join(taskDir, "tasks.md"), "- [x] one\n", "utf8");
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_tasks: "tasks.md",
+    }));
+    writeFileSync(join(taskDir, "OPEN_QUESTIONS.md"), "# Open questions\n\nAll clear.\n", "utf8");
+    const scriptPath = writeMockAgent(taskDir, agentDone);
+
+    const result = await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.notEqual(result.status, "complete");
+    assert.equal(result.iterations[0]?.completionPromiseMatched, undefined);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+
+test("runRalphLoop resolves openspec_change through execFile argv and does not archive", async () => {
+  const taskDir = createTempDir();
+  try {
+    const ralphPath = writeRalphMd(taskDir, minimalRalphMd({
+      max_iterations: 1,
+      completion_promise: "DONE",
+      openspec_change: "add-widget",
+    }));
+    writeFileSync(join(taskDir, "OPEN_QUESTIONS.md"), "# Open questions\n\nAll clear.\n", "utf8");
+    const scriptPath = writeMockAgent(taskDir, agentDone);
+    const calls: string[][] = [];
+
+    await runRalphLoop({
+      ralphPath,
+      cwd: taskDir,
+      timeout: 10,
+      maxIterations: 1,
+      completionPromise: "DONE",
+      guardrails: { blockCommands: [], protectedFiles: [] },
+      spawnCommand: "bash",
+      spawnArgs: [scriptPath],
+      openspecExecFile: async (file, args) => {
+        calls.push([file, ...args]);
+        return {
+          stdout: JSON.stringify({
+            state: "ready",
+            progress: { total: 1, complete: 0, remaining: 1 },
+            tasks: [{ description: "1.1 parse", done: false }],
+          }),
+          stderr: "",
+        };
+      },
+      runCommandsFn: async () => [],
+      pi: makeMockPi(),
+    });
+
+    assert.deepEqual(calls[0], ["openspec", "instructions", "apply", "--change", "add-widget", "--json"]);
+    assert.equal(calls.some((call) => call.includes("archive") || call.includes("bash")), false);
+    assert.equal(calls[0]?.join("\0").includes("bash -c"), false);
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true });
+  }
+});
+

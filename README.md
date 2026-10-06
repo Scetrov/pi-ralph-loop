@@ -250,6 +250,8 @@ Stop with <promise>DONE</promise> only when all tests pass, AUTH_FIXES.md exists
 | `timeout` | integer | `300` | 1–3600 seconds per iteration |
 | `completion_promise` | string | — | Done marker. Single line, no `<>` or line breaks |
 | `completion_gate` | `required` \| `optional` \| `disabled` | `required` when `completion_promise` is set | Controls whether the promise, required outputs, and OPEN_QUESTIONS.md readiness block stopping |
+| `openspec_change` | string | — | Optional OpenSpec change name. Requires `completion_promise`. Token: `^[A-Za-z0-9][A-Za-z0-9._-]*$` |
+| `openspec_tasks` | string | — | Optional cwd-relative tasks file. Requires `completion_promise`. When set, this file is the ledger and the CLI is not required |
 | `required_outputs` | string[] | `[]` | Relative file paths that must exist for early stop |
 | `stop_on_error` | boolean | `true` | `false` continues past RPC errors and timeouts |
 | `guardrails.block_commands` | string[] | `[]` | Default shell blocklist. Matching bash commands are blocked |
@@ -338,6 +340,18 @@ With multiple active runs, an interactive stop, cancel, or pathless status comma
 
 In `optional` and `disabled` mode, `complete` means the promise was matched; those modes do not block on `required_outputs` or OPEN_QUESTIONS.md readiness.
 Commands with `acceptance: true` require `completion_promise` and an effective `required` gate. To migrate an invalid configuration, add `completion_promise` plus `completion_gate: required` (or omit the gate so it defaults to `required`), or remove `acceptance: true`.
+
+### OpenSpec task ledger
+
+Loops that do not set `openspec_change` or `openspec_tasks` keep the existing progress and completion behavior. Setting either key binds the loop to one OpenSpec checkbox ledger and requires `completion_promise`.
+
+- `openspec_change` resolves the ledger with `openspec instructions apply --change <id> --json` in the repo cwd. The change id is an argument, not a shell string.
+- `openspec_tasks` reads that cwd-relative file instead. A path that escapes the repo, including through a symlink, is rejected and is not read. If both keys are set, the file is the ledger and the change name is display-only.
+- Newly checked tasks are the iteration progress signal. Zero newly checked tasks warns and continues. It does not fail the iteration or block the completion gate by itself. An unreadable ledger is `progress: unknown` plus a warning, not a false completion.
+- A rising complete count whose description does not match a previously unchecked task still counts as progress, with a warning that the checked task could not be named.
+- The iteration prompt asks the agent to attempt more than one remaining task, to mark finished tasks `- [x]` in the tasks file, and not to archive. That is guidance, not a quota. `items_per_iteration` stays an optional ceiling.
+- A matched completion promise stops the loop only when the ledger has at least one task and none remain. This check runs even when `completion_gate` is `disabled`. Disabled still skips required outputs, `OPEN_QUESTIONS.md`, and acceptance reruns.
+- Ralph does not stop just because the CLI reports `all_done`, and it does not archive the change.
 
 When the gate is `required`, completion still needs **all conditions**:
 

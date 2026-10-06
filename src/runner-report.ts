@@ -367,6 +367,24 @@ ${outcomes.map((outcome) => `      <tr><td>${escapeHtml(stringValue(outcome.name
   </table></div>`;
 }
 
+function renderOpenSpecEvidence(iteration: JsonRecord): string {
+  const openspec = objectValue(iteration.openspec);
+  if (!openspec) return "";
+  const checkedOff = arrayOfStrings(openspec.checkedOff);
+  const before = objectValue(openspec.before);
+  const after = objectValue(openspec.after);
+  const counts = before && after
+    ? `${numberValue(before.complete) ?? "?"}/${numberValue(before.total) ?? "?"} → ${numberValue(after.complete) ?? "?"}/${numberValue(after.total) ?? "?"}`
+    : "";
+  const warning = typeof openspec.warning === "string" ? openspec.warning : "";
+  return `<div class="evidence-block">
+    <h4>OpenSpec</h4>
+    <p>${escapeHtml(checkedOff.length > 0 ? checkedOff.join("; ") : "No named tasks checked off")}</p>
+    ${counts ? `<p>${escapeHtml(counts)}</p>` : ""}
+    ${warning ? renderCallout("warn", warning) : ""}
+  </div>`;
+}
+
 function renderIterationCards(iterations: JsonRecord[]): string {
   if (iterations.length === 0) return renderCallout("warn", "No iteration records were exported. The runner may not have entered its first iteration, or artifacts may be incomplete.");
 
@@ -395,6 +413,7 @@ function renderIterationCards(iterations: JsonRecord[]): string {
   ${summary ? `<p class="iteration-summary">${escapeHtml(summary)}</p>` : ""}
   ${gate.reasons.length > 0 ? renderCallout(gate.kind, `Blocking reasons: ${gate.reasons.join("; ")}`) : ""}
   ${warnings.map((warning) => renderCallout("warn", warning)).join("\n")}
+  ${renderOpenSpecEvidence(iteration)}
   <div class="evidence-block">
     <h4>Changed files</h4>
     ${renderChangedFiles(changedFiles)}

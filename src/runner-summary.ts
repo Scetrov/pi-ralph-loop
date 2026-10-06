@@ -33,6 +33,21 @@ type SummaryStatus = {
   completedAt?: string;
 };
 
+type SummaryOpenSpecCounts = {
+  total: number;
+  complete: number;
+  remaining: number;
+};
+
+type SummaryOpenSpecRecord = {
+  change?: string;
+  tasksPath?: string;
+  before?: SummaryOpenSpecCounts;
+  after?: SummaryOpenSpecCounts;
+  checkedOff: string[];
+  warning?: string;
+};
+
 type SummaryIterationRecord = {
   iteration: number;
   status: string;
@@ -43,6 +58,7 @@ type SummaryIterationRecord = {
   changedFiles: string[];
   noProgressStreak: number;
   completionGate?: { ready: boolean; reasons: string[] };
+  openspec?: SummaryOpenSpecRecord;
   loopToken?: string;
 };
 
@@ -138,6 +154,28 @@ function coerceCompletionGate(value: unknown): { ready: boolean; reasons: string
   return { ready: record.ready, reasons: stringArray(record.reasons) };
 }
 
+function coerceOpenSpecCounts(value: unknown): SummaryOpenSpecCounts | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  if (typeof record.total !== "number" || typeof record.complete !== "number" || typeof record.remaining !== "number") return undefined;
+  return { total: record.total, complete: record.complete, remaining: record.remaining };
+}
+
+function coerceOpenSpec(value: unknown): SummaryOpenSpecRecord | undefined {
+  const record = asRecord(value);
+  if (!record || !Array.isArray(record.checkedOff)) return undefined;
+  const checkedOff = stringArray(record.checkedOff);
+  if (checkedOff.length !== record.checkedOff.length) return undefined;
+  return {
+    ...(typeof record.change === "string" ? { change: record.change } : {}),
+    ...(typeof record.tasksPath === "string" ? { tasksPath: record.tasksPath } : {}),
+    ...(coerceOpenSpecCounts(record.before) ? { before: coerceOpenSpecCounts(record.before) } : {}),
+    ...(coerceOpenSpecCounts(record.after) ? { after: coerceOpenSpecCounts(record.after) } : {}),
+    checkedOff,
+    ...(typeof record.warning === "string" ? { warning: record.warning } : {}),
+  };
+}
+
 function readSummaryStatus(taskDir: string): SummaryStatus | undefined {
   if (!isSafeExistingRunnerDir(taskDir)) return undefined;
   const raw = readRegularFileBounded(join(runnerDir(taskDir), "status.json"), "status.json");
@@ -176,6 +214,7 @@ function readSummaryIterations(taskDir: string): SummaryIterationRecord[] {
       changedFiles: stringArray(record.changedFiles),
       noProgressStreak: typeof record.noProgressStreak === "number" ? record.noProgressStreak : 0,
       ...(coerceCompletionGate(record.completionGate) ? { completionGate: coerceCompletionGate(record.completionGate) } : {}),
+      ...(coerceOpenSpec(record.openspec) ? { openspec: coerceOpenSpec(record.openspec) } : {}),
       ...(typeof record.loopToken === "string" ? { loopToken: record.loopToken } : {}),
     }];
   });
@@ -304,12 +343,24 @@ function formatCompletionGate(record: SummaryIterationRecord | undefined): strin
   return `Blocked: ${record.completionGate.reasons.length > 0 ? record.completionGate.reasons.join("; ") : "unknown reason"}.`;
 }
 
+function formatOpenSpecCounts(counts: SummaryOpenSpecCounts | undefined): string {
+  if (!counts) return "unknown";
+  return `${counts.complete}/${counts.total} remaining=${counts.remaining}`;
+}
+
+function formatOpenSpec(record: SummaryIterationRecord): string {
+  const openspec = record.openspec;
+  if (!openspec) return "";
+  const names = openspec.checkedOff.length > 0 ? openspec.checkedOff.join("; ") : "none";
+  return ` openspecCheckedOff=${names} openspecBefore=${formatOpenSpecCounts(openspec.before)} openspecAfter=${formatOpenSpecCounts(openspec.after)}`;
+}
+
 function formatRecentIterations(records: SummaryIterationRecord[], count: number): string[] {
   const recent = records.slice(-Math.max(1, count));
   if (recent.length === 0) return ["No iteration records found."];
   return recent.map((record) => {
     const changed = record.changedFiles.length > 0 ? record.changedFiles.join(", ") : "none";
-    return `- #${record.iteration} ${record.status} progress=${record.progress} duration=${formatDuration(record.durationMs)} changed=${changed} noProgressStreak=${record.noProgressStreak}`;
+    return `- #${record.iteration} ${record.status} progress=${record.progress} duration=${formatDuration(record.durationMs)} changed=${changed} noProgressStreak=${record.noProgressStreak}${formatOpenSpec(record)}`;
   });
 }
 

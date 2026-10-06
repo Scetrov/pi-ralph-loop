@@ -83,6 +83,8 @@ my-task/
 | `timeout` | integer | `300` | Seconds per iteration. Valid values: 1–3600 |
 | `completion_promise` | string | — | Done marker. Single line, no `<>` or line breaks |
 | `completion_gate` | `required` \| `optional` \| `disabled` | `required` when `completion_promise` is set | Controls whether required outputs, OPEN_QUESTIONS.md readiness, and `acceptance: true` reruns block stopping |
+| `openspec_change` | string | — | Optional OpenSpec change name. Requires `completion_promise` |
+| `openspec_tasks` | string | — | Optional cwd-relative tasks file. Requires `completion_promise`. When set, this file is the ledger |
 | `required_outputs` | string[] | `[]` | Relative file paths that must exist for completion |
 | `stop_on_error` | boolean | `true` | `false` continues past RPC errors and timeouts |
 | `guardrails.block_commands` | string[] | `[]` | Default shell blocklist. Matching bash commands are blocked |
@@ -195,6 +197,8 @@ Use `completion_promise` to define an early stop signal. Use `completion_gate` t
 - `optional` — the prompt still reminds the agent about outputs and OPEN_QUESTIONS.md, but `complete` can happen once the promise is emitted
 - `disabled` — the loop skips completion-gate reminders and checks, so `complete` can happen once the promise is emitted
 Commands with `acceptance: true` require `completion_promise` and an effective `required` gate. Migrate by adding `completion_promise` plus `completion_gate: required` (or omitting the gate so it defaults to `required`), or remove `acceptance: true`.
+
+Loops that omit `openspec_change` and `openspec_tasks` are unchanged. When either key is set, newly checked OpenSpec tasks are the progress signal: zero checkoffs warn and continue, and a matched promise stops only if the ledger has tasks and none remain. That ledger check still applies when `completion_gate` is `disabled`. Ralph does not archive the change. See the config cookbook for a copyable binding.
 
 
 ```yaml
