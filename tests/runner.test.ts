@@ -3123,7 +3123,11 @@ test("runRalphLoop warns and continues when no OpenSpec task is checked off, eve
     assert.deepEqual(result.iterations[0]?.openspec?.checkedOff, []);
     assert.ok(result.iterations[0]?.changedFiles.includes("edited.ts"));
     assert.match(result.iterations[0]?.openspec?.warning ?? "", /No OpenSpec task was checked off/);
-    assert.ok(notifications.some((message) => message.includes("No OpenSpec task was checked off")));
+    const checkoffWarnings = notifications.filter((message) => /no openspec task was checked off/i.test(message));
+    assert.deepEqual(checkoffWarnings, [
+      "Iteration 1: No OpenSpec task was checked off. No-progress streak: 1.",
+      "Iteration 2: No OpenSpec task was checked off. No-progress streak: 2.",
+    ]);
   } finally {
     rmSync(taskDir, { recursive: true, force: true });
   }
