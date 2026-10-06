@@ -551,6 +551,10 @@ function isKnownPiStaleExtensionContextError(err: unknown): boolean {
   );
 }
 
+type IterationUiMessage = {
+  text: string;
+};
+
 function appendLoopEntryBestEffort(pi: ExtensionAPI, customType: string, data: unknown) {
   try {
     pi.appendEntry?.(customType, data);
@@ -1638,6 +1642,42 @@ function applyStopTarget(
 }
 
 const RALPH_EXTENSION_REGISTERED = Symbol.for("pi-ralph-loop.registered");
+const RALPH_ITERATION_UI_TYPE = "ralph-iteration-ui";
+
+function renderIterationUiMessage(message: { display?: boolean; details?: unknown }, width: number): string[] {
+  const details = message.details as Partial<IterationUiMessage> | undefined;
+  if (message.display === false || typeof details?.text !== "string") return [];
+  const lines: string[] = [];
+  let line = "";
+  let columns = 0;
+  const limit = Math.max(1, width);
+  for (const char of details.text) {
+    if (char === "\n" || columns >= limit) {
+      lines.push(line);
+      line = "";
+      columns = 0;
+      if (char === "\n") continue;
+    }
+    line += char;
+    columns += 1;
+  }
+  lines.push(line);
+  return lines;
+}
+
+function recordIterationUi(pi: ExtensionAPI, ctx: Pick<CommandContext, "ui">, message: string, level: "info" | "warning" | "error"): void {
+  ctx.ui.notify(message, level);
+  if (level !== "info") return;
+  const sendPersistentMessage = (pi as ExtensionAPI & {
+    sendMessage?: (message: { customType: string; content: string; display: boolean; details: IterationUiMessage }, options?: { triggerTurn?: boolean }) => void;
+  }).sendMessage;
+  sendPersistentMessage?.call(pi, {
+    customType: RALPH_ITERATION_UI_TYPE,
+    content: message,
+    display: false,
+    details: { text: message },
+  }, { triggerTurn: false });
+}
 
 const SCAFFOLD_PRESET_FILES = {
   "fix-tests": new URL("../presets/fix-tests/RALPH.md", import.meta.url),
@@ -1843,7 +1883,13 @@ function slugifyTaskName(text: string): string {
 }
 
 export default function (pi: ExtensionAPI, services: RegisterRalphCommandServices = {}) {
-  const registeredPi = pi as ExtensionAPI & Record<symbol, boolean | undefined>;
+  const registeredPi = pi as ExtensionAPI & Record<symbol, boolean | undefined> & {
+    registerMessageRenderer?: (customType: string, renderer: (message: { display?: boolean; details?: unknown }) => { invalidate: () => void; render: (width: number) => string[] }) => void;
+  };
+  registeredPi.registerMessageRenderer?.(RALPH_ITERATION_UI_TYPE, (message) => ({
+    invalidate() {},
+    render: (width: number) => renderIterationUiMessage(message, width),
+  }));
   if (registeredPi[RALPH_EXTENSION_REGISTERED]) return;
   registeredPi[RALPH_EXTENSION_REGISTERED] = true;
   const failCounts = new Map<string, number>();
@@ -2013,14 +2059,17 @@ export default function (pi: ExtensionAPI, services: RegisterRalphCommandService
           if (status === "initializing" || status === "running") handle.phase = status;
           updateSessionRunUi(handle.currentCommandCtx);
         },
-        onIterationStart(iteration) {
+        onIterationStart(iteration, maxIterations) {
           handle.iteration = iteration;
           runState.iteration = iteration;
           updateSessionRunUi(handle.currentCommandCtx);
+          const prefix = sessionRuns.size > 1 ? `[${handle.name}] ` : "";
+          recordIterationUi(sessionPi, handle.currentCommandCtx, `${prefix}Iteration ${iteration}/${maxIterations} starting`, "info");
         },
         onNotify(message, level) {
+          if (level === "info" && message.startsWith("Iteration ") && message.endsWith(" starting")) return;
           const prefix = sessionRuns.size > 1 ? `[${handle.name}] ` : "";
-          handle.currentCommandCtx.ui.notify(`${prefix}${message}`, level);
+          recordIterationUi(sessionPi, handle.currentCommandCtx, `${prefix}${message}`, level);
         },
         onIterationComplete(record) {
           handle.iteration = record.iteration;

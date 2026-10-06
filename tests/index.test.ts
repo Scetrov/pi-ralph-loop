@@ -75,10 +75,12 @@ function createHarness(options?: {
   exec?: (...args: Array<any>) => Promise<any>;
   sendUserMessage?: (...args: Array<any>) => any;
   appendEntry?: (customType: string, data: unknown) => void;
+  sendMessage?: (message: any, options?: any) => void;
   runRalphLoopFn?: (config: RunnerConfig) => Promise<RunnerResult>;
 }) {
   const handlers = new Map<string, (args: string, ctx: any) => Promise<string | undefined>>();
   const eventHandlers = new Map<string, (...args: Array<any>) => Promise<any> | any>();
+  const messageRenderers = new Map<string, (message: any, options: unknown, theme: unknown) => { render: (width: number) => string[] }>();
   const appendedEntries: Array<any> = [];
   let activeCtx: any;
   const resolveRuntimeCtx = () => activeCtx?.getRuntimeCtx?.() ?? activeCtx;
@@ -107,6 +109,13 @@ function createHarness(options?: {
     appendEntry: (customType: string, data: unknown) => {
       appendSessionEntry({ type: "custom", customType, data });
       options?.appendEntry?.(customType, data);
+    },
+    registerMessageRenderer: (customType: string, renderer: (message: any, options: unknown, theme: unknown) => { render: (width: number) => string[] }) => {
+      messageRenderers.set(customType, renderer);
+    },
+    sendMessage: (message: any, sendOptions?: any) => {
+      appendSessionEntry({ type: "custom_message", ...message });
+      options?.sendMessage?.(message, sendOptions);
     },
     sendUserMessage,
     exec,
@@ -140,6 +149,12 @@ function createHarness(options?: {
 
   return {
     appendedEntries,
+    renderPersistentMessages(width = 80) {
+      return appendedEntries.flatMap((entry) => {
+        const renderer = messageRenderers.get(entry.customType);
+        return renderer ? renderer(entry, {}, {}).render(width) : [];
+      });
+    },
     handler(name: string) {
       const handler = handlers.get(name);
       assert.ok(handler, `missing handler for ${name}`);
@@ -3755,6 +3770,78 @@ test("/ralph subprocess child injects durable loop context into before_agent_sta
   assert.match(result.systemPrompt, /Previous iterations:\n- Iteration 1: 1s — durable progress \(notes\/findings\.md\); no-progress streak: 0/);
   assert.match(result.systemPrompt, /Last iteration durable progress: notes\/findings\.md\./);
   assert.deepEqual(proofEntries.map((entry) => entry.customType), ["ralph-steering-injected", "ralph-loop-context-injected"]);
+});
+
+test("/ralph retains persistent iteration records across OpenSpec progress resets", async (t) => {
+  const cwd = createTempDir();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const taskDir = join(cwd, "persistent-log");
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(join(taskDir, "RALPH.md"), `---
+max_iterations: 3
+completion_promise: DONE
+openspec_change: persistent-log
+openspec_tasks: openspec/changes/persistent-log/tasks.md
+---
+# Persistent log
+`, "utf8");
+
+  const notifications: Array<{ message: string; level: string }> = [];
+  const persistentMessages: Array<any> = [];
+  const harness = createHarness({
+    sendMessage: (message, sendOptions) => persistentMessages.push({ message, sendOptions }),
+    runRalphLoopFn: async (config) => {
+      const records = [
+        { iteration: 1, progress: false, warning: "No OpenSpec task was checked off" },
+        { iteration: 2, progress: true, checkedOff: ["1.1 Persist the iteration record"] },
+        { iteration: 3, progress: false, warning: "No OpenSpec task was checked off" },
+      ] as const;
+      for (const record of records) {
+        config.onIterationStart?.(record.iteration, 3);
+        config.onNotify?.(`Iteration ${record.iteration}/${3} starting`, "info");
+        config.onNotify?.(
+          record.progress
+            ? `Iteration ${record.iteration} OpenSpec progress: ${record.checkedOff[0]}`
+            : `Iteration ${record.iteration}: ${record.warning}. No-progress streak: 1.`,
+          record.progress ? "info" : "warning",
+        );
+      }
+      config.onNotify?.("Ralph loop reached max iterations", "info");
+      return { status: "max-iterations", iterations: [], totalDurationMs: 0 };
+    },
+  });
+
+  const command = harness.handler("ralph")("--path ./persistent-log", {
+    cwd,
+    ui: {
+      notify: (message: string, level: string) => notifications.push({ message, level }),
+      setStatus: () => undefined,
+      setWidget: () => undefined,
+      select: async () => undefined,
+      confirm: async () => false,
+      input: async () => undefined,
+    },
+    hasUI: false,
+    sessionManager: { getEntries: () => [], getSessionFile: () => "session-a" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await command;
+
+  assert.deepEqual(notifications.filter(({ level }) => level === "error"), []);
+  assert.ok(persistentMessages.length > 0, `notifications=${JSON.stringify(notifications)}`);
+  const rendered = persistentMessages.map(({ message }) => message.details.text).join("\n");
+  assert.match(rendered, /Iteration 1\/3 starting[\s\S]*Iteration 2\/3 starting[\s\S]*Iteration 2 OpenSpec progress[\s\S]*Iteration 3\/3 starting/);
+  assert.match(rendered, /Iteration 3\/3 starting[\s\S]*Ralph loop reached max iterations/);
+  const persistentStart = rendered.indexOf("Iteration 1/3 starting");
+  assert.equal(rendered.slice(persistentStart).includes("Iteration 1/3 starting", 1), false);
+  assert.deepEqual(
+    notifications.filter(({ level }) => level === "warning").map(({ message }) => message),
+    [
+      "Iteration 1: No OpenSpec task was checked off. No-progress streak: 1.",
+      "Iteration 3: No OpenSpec task was checked off. No-progress streak: 1.",
+    ],
+  );
+  assert.equal(notifications.filter(({ level, message }) => level === "info" && message.includes("Iteration 1/3 starting")).length, 1);
 });
 
 test("/ralph subprocess child scopes durable history to the current loop token", { concurrency: false }, async (t) => {
