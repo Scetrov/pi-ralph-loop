@@ -1257,16 +1257,18 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
 
       // Notify progress
       if (openspecBinding) {
-        if (openspecDiff?.warning) {
-          notify(`Iteration ${i}: ${openspecDiff.warning}`, "warning");
-        }
         if (progress === true) {
+          if (openspecDiff?.warning) {
+            notify(`Iteration ${i}: ${openspecDiff.warning}`, "warning");
+          }
           const named = openspecRecord?.checkedOff.join("; ");
           notify(`Iteration ${i} OpenSpec progress: ${named || "complete count increased"}`, "info");
         } else if (progress === false) {
-          notify(`Iteration ${i}: no OpenSpec task was checked off. No-progress streak: ${noProgressStreak}.`, "warning");
+          const detail = openspecDiff?.warning ?? "No OpenSpec task was checked off";
+          notify(`Iteration ${i}: ${detail}. No-progress streak: ${noProgressStreak}.`, "warning");
         } else {
-          notify(`Iteration ${i}: OpenSpec ledger could not be read. No-progress streak remains ${noProgressStreak}.`, "warning");
+          const detail = openspecDiff?.warning ?? "OpenSpec ledger could not be read";
+          notify(`Iteration ${i}: ${detail}. No-progress streak remains ${noProgressStreak}.`, "warning");
         }
       } else if (progress === true) {
         notify(`Iteration ${i} durable progress: ${summarizeChangedFiles(changedFiles)}`, "info");
