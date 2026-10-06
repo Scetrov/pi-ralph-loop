@@ -143,6 +143,33 @@ guardrails:
 
 Use when you want the loop to run until the iteration budget or a stop request ends it.
 
+## 7. OpenSpec change ledger
+
+```yaml
+---
+commands:
+  - name: tests
+    run: npm test
+    timeout: 120
+max_iterations: 20
+completion_promise: DONE
+completion_gate: disabled
+openspec_change: add-widget
+stop_on_error: true
+guardrails:
+  block_commands:
+    - 'git\s+push'
+---
+```
+
+Use when the loop should work through one OpenSpec change. `openspec_change` requires `completion_promise`. Ralph resolves that change with `openspec instructions apply --change <id> --json` and treats newly checked tasks as iteration progress.
+
+An iteration that checks off nothing warns and continues. It does not fail the iteration. An unreadable ledger is `progress: unknown` plus a warning. The prompt asks the agent to attempt more than one remaining task and to mark finished tasks `- [x]` in the tasks file. That is guidance, not a quota.
+
+The loop stops early only when the agent emits the completion promise and the ledger has at least one task with none remaining. This still applies when `completion_gate` is `disabled`. Disabled mode does not revive required outputs, `OPEN_QUESTIONS.md`, or acceptance reruns. Ralph does not archive the change, and it does not stop just because the CLI reports `all_done`.
+
+Set `openspec_tasks` to a cwd-relative tasks file when you want that file to be the ledger instead of the CLI. Paths that escape the repo cwd, including through a symlink, are rejected. Loops that set neither key keep today's progress and completion behavior.
+
 ## Choosing a gate mode
 
 | Mode | Use it when |

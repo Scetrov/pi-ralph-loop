@@ -1,6 +1,7 @@
 import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
+import type { OpenSpecIterationRecord } from "./openspec-ledger.ts";
 
 // --- Types ---
 
@@ -65,9 +66,12 @@ export type IterationRecord = {
   commandOutcomes?: CommandOutcomeRecord[];
   snapshotTruncated?: boolean;
   snapshotErrorCount?: number;
+  openspec?: OpenSpecIterationRecord;
   loopToken?: string;
   rpcTelemetry?: import("./runner-rpc.ts").RpcTelemetry;
 };
+
+export type { OpenSpecIterationRecord };
 
 export type RunnerStartedEvent = {
   type: "runner.started";
@@ -791,6 +795,23 @@ function boundedTranscriptCommandOutput(output: string): string {
   return `${output.slice(0, headChars)}${marker}${output.slice(-tailChars)}`;
 }
 
+function formatOpenSpecCounts(counts: { complete: number; total: number } | undefined): string {
+  if (!counts) return "unknown";
+  return `${counts.complete}/${counts.total}`;
+}
+
+function openspecHeaderLines(record: IterationRecord): string[] {
+  const openspec = record.openspec;
+  if (!openspec) return [];
+  return [
+    `- OpenSpec change: ${openspec.change ?? "—"}`,
+    `- OpenSpec tasks: ${openspec.tasksPath ?? "—"}`,
+    `- OpenSpec counts: ${formatOpenSpecCounts(openspec.before)} -> ${formatOpenSpecCounts(openspec.after)}`,
+    `- OpenSpec checked off: ${openspec.checkedOff.length > 0 ? openspec.checkedOff.join("; ") : "none"}`,
+    ...(openspec.warning ? [`- OpenSpec warning: ${openspec.warning}`] : []),
+  ];
+}
+
 function transcriptHeaderLines(record: IterationRecord): string[] {
   const lines = [
     `- Status: ${record.status}`,
@@ -799,6 +820,7 @@ function transcriptHeaderLines(record: IterationRecord): string[] {
     `- Changed files: ${record.changedFiles.length > 0 ? record.changedFiles.join(", ") : "none"}`,
     `- No-progress streak: ${record.noProgressStreak}`,
     ...(record.commandOutcomes?.length ? [`- Command outcomes: ${record.commandOutcomes.map((outcome) => `${outcome.name}:${outcome.status}`).join(", ")}`] : []),
+    ...openspecHeaderLines(record),
     ...completionHeaderLines(record),
     ...rpcTelemetryHeaderLines(record),
   ];

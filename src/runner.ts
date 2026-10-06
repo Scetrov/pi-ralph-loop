@@ -11,8 +11,18 @@ import {
   type CommandDef,
   type CommandOutput,
   type Frontmatter,
+  type OpenSpecPromptContext,
   type RuntimeArgs,
 } from "./ralph.ts";
+import {
+  assessOpenSpecCompletion,
+  diffOpenSpecLedgers,
+  inspectOpenSpecTasksPath,
+  resolveOpenSpecLedger,
+  summarizeOpenSpecPrompt,
+  type OpenSpecExecFile,
+  type OpenSpecLedger,
+} from "./openspec-ledger.ts";
 import {
   type CommandOutcomeRecord,
   type CompletionRecord,
@@ -93,6 +103,8 @@ export type RunnerConfig = {
   pi?: unknown;
   /** Runtime args resolved from RALPH frontmatter */
   runtimeArgs?: RuntimeArgs;
+  /** Override for OpenSpec ledger resolution, for testing. Never receives a shell string. */
+  openspecExecFile?: OpenSpecExecFile;
 };
 
 export type RunnerResult = {
@@ -503,6 +515,19 @@ export function validateCompletionReadiness(taskDir: string, requiredOutputs: st
   return { ready: reasons.length === 0, reasons };
 }
 
+function openspecPromptContext(
+  ledger: OpenSpecLedger | undefined,
+  warning?: string,
+  blockingReasons?: string[],
+): OpenSpecPromptContext {
+  const summary = summarizeOpenSpecPrompt(ledger);
+  return {
+    ...summary,
+    ...(warning ? { warning } : {}),
+    ...(blockingReasons && blockingReasons.length > 0 ? { blockingReasons } : {}),
+  };
+}
+
 // --- Core Runner ---
 
 export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> {
@@ -567,7 +592,10 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
   let currentGuardrails = initialGuardrails;
   let completionGateFailureReasons: string[] = [];
   let completionGateRejectionReasons: string[] = [];
+  let openspecBlockingReasons: string[] = [];
+  let openspecPreviousWarning: string | undefined;
   let noProgressStreak = 0;
+  const openspecExecFile = config.openspecExecFile;
   const iterations: IterationRecord[] = [];
   const startMs = Date.now();
 
@@ -734,6 +762,17 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
       currentInterIterationDelay = fm.interIterationDelay;
       currentGuardrails = fm.guardrails;
       currentStopOnError = config.stopOnError ?? fm.stopOnError;
+      const openspecBinding = fm.openspecChange || fm.openspecTasks
+        ? { change: fm.openspecChange, tasksPath: fm.openspecTasks }
+        : undefined;
+      if (openspecBinding?.tasksPath) {
+        const inspected = inspectOpenSpecTasksPath(cwd, openspecBinding.tasksPath);
+        if (inspected.kind === "rejected") {
+          notify(`Invalid RALPH.md on iteration ${i}: ${inspected.reason}`, "error");
+          finalStatus = "error";
+          break;
+        }
+      }
 
       // Update status to running
       const runningStatus: RunnerStatusFile = {
@@ -773,6 +812,14 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
 
       // Before snapshot
       const snapshotBefore = captureTaskDirectorySnapshot(ralphPath);
+      const ledgerBefore = openspecBinding
+        ? await resolveOpenSpecLedger({
+            cwd,
+            change: openspecBinding.change,
+            tasksPath: openspecBinding.tasksPath,
+            execFile: openspecExecFile,
+          })
+        : undefined;
 
       // Render prompt
       const body = renderRalphBody(rawBody, commandsOutput, { iteration: i, name, maxIterations: currentMaxIterations }, runtimeArgs);
@@ -799,6 +846,7 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
           elapsedSeconds: Math.round((Date.now() - startMs) / 1000),
           completionPromise: currentCompletionPromise,
         },
+        openspecBinding ? openspecPromptContext(ledgerBefore, openspecPreviousWarning, openspecBlockingReasons) : undefined,
       );
       const writeIterationTranscriptSafe = (record: IterationRecord, assistantText?: string, note?: string) => {
         try {
@@ -950,8 +998,22 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
       }
 
       // After snapshot
-      const { progress, changedFiles, snapshotTruncated, snapshotErrorCount } =
-        await assessTaskDirectoryProgress(ralphPath, snapshotBefore);
+      const snapshotAssessment = await assessTaskDirectoryProgress(ralphPath, snapshotBefore);
+      const { changedFiles, snapshotTruncated, snapshotErrorCount } = snapshotAssessment;
+      const ledgerAfter = openspecBinding
+        ? await resolveOpenSpecLedger({
+            cwd,
+            change: openspecBinding.change,
+            tasksPath: openspecBinding.tasksPath,
+            execFile: openspecExecFile,
+          })
+        : undefined;
+      const openspecDiff = openspecBinding && ledgerBefore && ledgerAfter
+        ? diffOpenSpecLedgers(ledgerBefore, ledgerAfter)
+        : undefined;
+      const progress = openspecDiff ? openspecDiff.progress : snapshotAssessment.progress;
+      const openspecRecord = openspecDiff?.record;
+      openspecPreviousWarning = openspecDiff?.warning;
 
       // Update no-progress streak
       if (progress === true) {
@@ -1084,6 +1146,33 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
             }
           }
         }
+      }
+
+      let openspecLedgerReadiness: CompletionReadiness | undefined;
+      if (completionPromiseMatched && openspecBinding) {
+        const completionLedger = await resolveOpenSpecLedger({
+          cwd,
+          change: openspecBinding.change,
+          tasksPath: openspecBinding.tasksPath,
+          execFile: openspecExecFile,
+        });
+        openspecLedgerReadiness = assessOpenSpecCompletion(completionLedger);
+        if (!openspecLedgerReadiness.ready) {
+          openspecBlockingReasons = openspecLedgerReadiness.reasons;
+        } else {
+          openspecBlockingReasons = [];
+        }
+        if (currentCompletionGateMode === "disabled") {
+          completionGate = openspecLedgerReadiness;
+        } else if (completionGate && !openspecLedgerReadiness.ready) {
+          completionGate = {
+            ready: false,
+            reasons: [...completionGate.reasons, ...openspecLedgerReadiness.reasons.filter((reason) => !completionGate?.reasons.includes(reason))],
+          };
+        }
+      }
+
+      if (completionPromiseMatched && completionGate && (currentCompletionGateMode !== "disabled" || openspecBinding)) {
         if (completionRecord) {
           completionRecord.gateChecked = true;
           completionRecord.gatePassed = completionGate.ready;
@@ -1143,6 +1232,7 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
         commandOutcomes: nonEmptyCommandOutcomes,
         snapshotTruncated,
         snapshotErrorCount,
+        ...(openspecRecord ? { openspec: openspecRecord } : {}),
         rpcTelemetry: rpcResult.telemetry,
       };
       iterations.push(iterRecord);
@@ -1166,7 +1256,19 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
       });
 
       // Notify progress
-      if (progress === true) {
+      if (openspecBinding) {
+        if (openspecDiff?.warning) {
+          notify(`Iteration ${i}: ${openspecDiff.warning}`, "warning");
+        }
+        if (progress === true) {
+          const named = openspecRecord?.checkedOff.join("; ");
+          notify(`Iteration ${i} OpenSpec progress: ${named || "complete count increased"}`, "info");
+        } else if (progress === false) {
+          notify(`Iteration ${i}: no OpenSpec task was checked off. No-progress streak: ${noProgressStreak}.`, "warning");
+        } else {
+          notify(`Iteration ${i}: OpenSpec ledger could not be read. No-progress streak remains ${noProgressStreak}.`, "warning");
+        }
+      } else if (progress === true) {
         notify(`Iteration ${i} durable progress: ${summarizeChangedFiles(changedFiles)}`, "info");
       } else if (progress === false) {
         notify(`Iteration ${i} made no durable progress. No-progress streak: ${noProgressStreak}.`,
@@ -1180,17 +1282,29 @@ export async function runRalphLoop(config: RunnerConfig): Promise<RunnerResult> 
 
       // Check completion promise
       if (completionPromiseMatched) {
-        const requiredCompletionGateBlocked = currentCompletionGateMode === "required" && completionGate !== undefined && !completionGate.ready;
-        if (progress === false && requiredCompletionGateBlocked) {
+        const requiredCompletionGateBlocked = currentCompletionGateMode === "required" && completionGate !== undefined && !completionGate.ready && (
+          openspecLedgerReadiness === undefined || completionGate.reasons.some((reason) => !openspecLedgerReadiness?.reasons.includes(reason))
+        );
+        const openspecLedgerBlocked = openspecLedgerReadiness !== undefined && !openspecLedgerReadiness.ready;
+        if (progress === false && requiredCompletionGateBlocked && !openspecLedgerBlocked) {
           completionGateRejectionReasons = [
             "durable progress (no durable file changes were observed)",
             ...(completionGate?.reasons ?? []),
           ];
           notify(`Completion promise matched on iteration ${i}, but no durable progress was detected and the completion gate failed. Continuing.`,
           "warning",);
-        } else if (requiredCompletionGateBlocked) {
-          notify(`completion promise matched on iteration ${i}, but the completion gate failed. Continuing.`,
-          "warning",);
+        } else if (requiredCompletionGateBlocked || openspecLedgerBlocked) {
+          if (openspecLedgerBlocked) {
+            completionGateRejectionReasons = [
+              ...(progress === false && requiredCompletionGateBlocked ? ["durable progress (no durable file changes were observed)"] : []),
+              ...(openspecLedgerReadiness?.reasons ?? []),
+              ...(requiredCompletionGateBlocked ? (completionGate?.reasons ?? []).filter((reason) => !openspecLedgerReadiness?.reasons.includes(reason)) : []),
+            ];
+            notify(`Completion promise matched on iteration ${i}, but the OpenSpec ledger is not finished. Continuing.`, "warning");
+          } else {
+            notify(`completion promise matched on iteration ${i}, but the completion gate failed. Continuing.`,
+            "warning",);
+          }
         } else {
           completionGateRejectionReasons = [];
           if (progress === "unknown") {

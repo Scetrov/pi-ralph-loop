@@ -23,6 +23,8 @@ export type Frontmatter = {
   timeout: number;
   completionPromise?: string;
   completionGate?: CompletionGateMode;
+  openspecChange?: string;
+  openspecTasks?: string;
   requiredOutputs?: string[];
   stopOnError: boolean;
   guardrails: { blockCommands: string[]; protectedFiles: string[]; shellPolicy?: ShellPolicy };
@@ -378,6 +380,11 @@ function validateRawFrontmatterShape(rawFrontmatter: UnknownRecord): string | nu
     }
   }
 
+  const openspecShapeError = validateRawOpenSpecShape(rawFrontmatter);
+  if (openspecShapeError) {
+    return openspecShapeError;
+  }
+
   if (hasOwn(rawFrontmatter, "args")) {
     const argsError = validateRawArgsShape(rawFrontmatter);
     if (argsError) {
@@ -526,7 +533,7 @@ function isSafeCompletionPromise(value: string): boolean {
   return !/[\r\n<>]/.test(value);
 }
 
-function validateRequiredOutputEntry(value: string): string | null {
+export function validateRelativeRepoFilePath(value: string): string | null {
   const trimmed = value.trim();
   if (
     !trimmed ||
@@ -541,7 +548,32 @@ function validateRequiredOutputEntry(value: string): string | null {
     trimmed.endsWith("\\") ||
     trimmed.split("/").some((segment) => segment === "." || segment === "..")
   ) {
+    return `Invalid relative file path: ${value}`;
+  }
+  return null;
+}
+
+function validateRequiredOutputEntry(value: string): string | null {
+  if (validateRelativeRepoFilePath(value)) {
     return `Invalid required_outputs entry: ${value} must be a relative file path`;
+  }
+  return null;
+}
+
+const OPENSPEC_CHANGE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function validateRawOpenSpecShape(rawFrontmatter: UnknownRecord): string | null {
+  if (hasAliasedValue(rawFrontmatter, "openspec_change", "openspecChange")) {
+    const value = readAliasedValue(rawFrontmatter, "openspec_change", "openspecChange");
+    if (typeof value !== "string") {
+      return "Invalid RALPH frontmatter: openspec_change must be a YAML string";
+    }
+  }
+  if (hasAliasedValue(rawFrontmatter, "openspec_tasks", "openspecTasks")) {
+    const value = readAliasedValue(rawFrontmatter, "openspec_tasks", "openspecTasks");
+    if (typeof value !== "string") {
+      return "Invalid RALPH frontmatter: openspec_tasks must be a YAML string";
+    }
   }
   return null;
 }
@@ -678,6 +710,8 @@ export function parseRalphMarkdown(raw: string): ParsedRalph {
   const reflectEvery = parseOptionalNumber(readAliasedValue(yaml, "reflect_every", "reflectEvery"));
   const completionPromise = readAliasedValue(yaml, "completion_promise", "completionPromise");
   const completionGate = readAliasedValue(yaml, "completion_gate", "completionGate");
+  const openspecChange = readAliasedValue(yaml, "openspec_change", "openspecChange");
+  const openspecTasks = readAliasedValue(yaml, "openspec_tasks", "openspecTasks");
 
   return {
     frontmatter: {
@@ -690,6 +724,8 @@ export function parseRalphMarkdown(raw: string): ParsedRalph {
       timeout: Number(yaml.timeout ?? 300),
       completionPromise: typeof completionPromise === "string" && completionPromise.trim() ? completionPromise : undefined,
       ...(typeof completionGate === "string" && completionGate.trim() ? { completionGate: completionGate as CompletionGateMode } : {}),
+      ...(typeof openspecChange === "string" ? { openspecChange } : {}),
+      ...(typeof openspecTasks === "string" ? { openspecTasks } : {}),
       requiredOutputs: toStringArray(readAliasedValue(yaml, "required_outputs", "requiredOutputs")),
       stopOnError: readAliasedValue(yaml, "stop_on_error", "stopOnError") === false ? false : true,
       guardrails: {
@@ -735,6 +771,15 @@ export function validateFrontmatter(fm: Frontmatter): string | null {
   }
   if (fm.completionPromise !== undefined && !isSafeCompletionPromise(fm.completionPromise)) {
     return "Invalid completion_promise: must be a single-line string without line breaks or angle brackets";
+  }
+  if (fm.openspecChange !== undefined && !OPENSPEC_CHANGE_PATTERN.test(fm.openspecChange)) {
+    return "Invalid openspec_change: must match ^[A-Za-z0-9][A-Za-z0-9._-]*$";
+  }
+  if (fm.openspecTasks !== undefined && validateRelativeRepoFilePath(fm.openspecTasks)) {
+    return `Invalid openspec_tasks: ${fm.openspecTasks} must be a relative file path under the repo cwd`;
+  }
+  if ((fm.openspecChange !== undefined || fm.openspecTasks !== undefined) && !fm.completionPromise) {
+    return "Invalid OpenSpec binding: openspec_change or openspec_tasks requires completion_promise";
   }
   if (fm.completionGate !== undefined && !["required", "optional", "disabled"].includes(fm.completionGate)) {
     return "Invalid completion_gate: must be required, optional, or disabled";
@@ -1719,6 +1764,18 @@ export type GoalRuntimeContext = {
   completionPromise?: string;
 };
 
+export type OpenSpecPromptContext = {
+  change?: string;
+  tasksPath?: string;
+  complete?: number;
+  total?: number;
+  remaining?: string[];
+  remainingTruncated?: boolean;
+  warning?: string;
+  blockingReasons?: string[];
+  unresolvedReason?: string;
+};
+
 export function renderIterationPrompt(
   body: string,
   iteration: number,
@@ -1726,6 +1783,7 @@ export function renderIterationPrompt(
   completionGate?: { completionPromise?: string; requiredOutputs?: string[]; completionGateMode?: CompletionGateMode; failureReasons?: string[]; rejectionReasons?: string[] },
   pacing?: { itemsPerIteration?: number; reflectEvery?: number },
   runtime?: GoalRuntimeContext,
+  openspec?: OpenSpecPromptContext,
 ): string {
   const extraBlocks: string[] = [];
 
@@ -1790,6 +1848,31 @@ export function renderIterationPrompt(
       ];
       extraBlocks.push(gateLines.join("\n"));
     }
+  }
+
+  if (openspec) {
+    const remaining = openspec.remaining ?? [];
+    const counts = openspec.complete !== undefined && openspec.total !== undefined
+      ? `${openspec.complete}/${openspec.total}`
+      : "unknown";
+    const openspecLines = [
+      "[openspec]",
+      ...(openspec.change ? [`- Change: ${openspec.change}`] : []),
+      ...(openspec.tasksPath ? [`- Tasks file: ${openspec.tasksPath}`] : []),
+      `- Progress: ${counts}`,
+      ...(openspec.unresolvedReason ? [`- Ledger could not be read: ${openspec.unresolvedReason}`] : []),
+      "- Remaining tasks:",
+      ...(remaining.length > 0 ? remaining.map((task) => `  - ${task}`) : ["  - none"]),
+      ...(openspec.remainingTruncated ? ["  - … remaining tasks truncated"] : []),
+      "- Attempt more than one remaining task. Do not stop after the first checkbox.",
+      "- Mark each finished task `- [x]` in the tasks file.",
+      "- Do not archive the change.",
+      ...(openspec.warning ? [`- Previous warning: ${openspec.warning}`] : []),
+      ...(openspec.blockingReasons && openspec.blockingReasons.length > 0
+        ? [`- OpenSpec ledger is not ready to stop: ${openspec.blockingReasons.join("; ")}`]
+        : []),
+    ];
+    extraBlocks.push(openspecLines.join("\n"));
   }
 
   return extraBlocks.length > 0

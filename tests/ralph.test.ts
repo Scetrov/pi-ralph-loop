@@ -242,6 +242,47 @@ test("inspectDraftContent validates stopOnError aliases as booleans", () => {
   assert.equal(inspection.error, "Invalid RALPH frontmatter: stop_on_error must be a YAML boolean");
 });
 
+test("parseRalphMarkdown accepts OpenSpec bindings and camelCase aliases", () => {
+  const parsed = parseRalphMarkdown(
+    "---\ncommands: []\nmax_iterations: 2\ntimeout: 60\ncompletionPromise: DONE\nopenspecChange: add-widget\nopenspecTasks: openspec/changes/add-widget/tasks.md\nguardrails:\n  blockCommands: []\n  protectedFiles: []\n---\nBody\n",
+  );
+
+  assert.equal(parsed.frontmatter.openspecChange, "add-widget");
+  assert.equal(parsed.frontmatter.openspecTasks, "openspec/changes/add-widget/tasks.md");
+  assert.equal(validateFrontmatter(parsed.frontmatter), null);
+
+  const snake = parseRalphMarkdown(
+    "---\ncommands: []\nmax_iterations: 2\ntimeout: 60\ncompletion_promise: DONE\nopenspec_change: add-widget\nopenspec_tasks: tasks.md\nguardrails:\n  block_commands: []\n  protected_files: []\n---\nBody\n",
+  );
+  assert.equal(snake.frontmatter.openspecChange, "add-widget");
+  assert.equal(snake.frontmatter.openspecTasks, "tasks.md");
+  assert.equal(validateFrontmatter(snake.frontmatter), null);
+});
+
+test("inspectDraftContent rejects an OpenSpec binding without completion_promise", () => {
+  for (const raw of [
+    "---\ncommands: []\nmax_iterations: 1\ntimeout: 60\nopenspec_change: add-widget\nguardrails:\n  block_commands: []\n  protected_files: []\n---\nBody\n",
+    "---\ncommands: []\nmax_iterations: 1\ntimeout: 60\nopenspec_tasks: tasks.md\nguardrails:\n  block_commands: []\n  protected_files: []\n---\nBody\n",
+  ]) {
+    const inspection = inspectDraftContent(raw);
+    assert.equal(inspection.error, "Invalid OpenSpec binding: openspec_change or openspec_tasks requires completion_promise");
+  }
+});
+
+test("inspectDraftContent rejects unsafe OpenSpec change tokens and escaping tasks paths", () => {
+  const unsafeChange = inspectDraftContent(
+    "---\ncommands: []\nmax_iterations: 1\ntimeout: 60\ncompletion_promise: DONE\nopenspec_change: ../add-widget\nguardrails:\n  block_commands: []\n  protected_files: []\n---\nBody\n",
+  );
+  assert.match(unsafeChange.error ?? "", /Invalid openspec_change/);
+
+  for (const tasksPath of ["../tasks.md", "/tmp/tasks.md", "tasks/../../tasks.md"]) {
+    const inspection = inspectDraftContent(
+      `---\ncommands: []\nmax_iterations: 1\ntimeout: 60\ncompletion_promise: DONE\nopenspec_tasks: ${JSON.stringify(tasksPath)}\nguardrails:\n  block_commands: []\n  protected_files: []\n---\nBody\n`,
+    );
+    assert.match(inspection.error ?? "", /Invalid openspec_tasks/);
+  }
+});
+
 test("parseRalphMarkdown gives snake_case keys precedence over camelCase aliases", () => {
   const parsed = parseRalphMarkdown(
     "---\ncommands: []\nmax_iterations: 3\nmaxIterations: nope\ntimeout: 60\ncompletion_gate: required\ncompletionGate: optional\nguardrails:\n  block_commands: []\n  blockCommands: nope\n  protected_files: []\n  protectedFiles: nope\n---\nBody\n",
@@ -1012,6 +1053,30 @@ test("renderIterationPrompt makes goal continuation promise guidance conditional
   });
   assert.match(disabledGate, /Only emit <promise>DONE<\/promise> when the audit shows/);
   assert.doesNotMatch(disabledGate, /\[completion gate\]/);
+});
+
+test("renderIterationPrompt includes a bounded OpenSpec block and does not force a pacing quota", () => {
+  const prompt = renderIterationPrompt("Body", 2, 7, undefined, undefined, undefined, {
+    change: "add-widget",
+    complete: 4,
+    total: 7,
+    remaining: ["3.2 write parser", "3.3 wire the gate"],
+    warning: "No OpenSpec task was checked off",
+    blockingReasons: ["OpenSpec ledger is not finished: 3 remaining of 7"],
+  });
+
+  assert.match(prompt, /\[openspec\]/);
+  assert.match(prompt, /Change: add-widget/);
+  assert.match(prompt, /Progress: 4\/7/);
+  assert.match(prompt, /3\.2 write parser/);
+  assert.match(prompt, /Attempt more than one remaining task/);
+  assert.match(prompt, /Do not stop after the first checkbox/);
+  assert.match(prompt, /Mark each finished task `- \[x\]` in the tasks file/);
+  assert.match(prompt, /Do not archive the change/);
+  assert.match(prompt, /Previous warning: No OpenSpec task was checked off/);
+  assert.match(prompt, /OpenSpec ledger is not ready to stop: OpenSpec ledger is not finished: 3 remaining of 7/);
+  assert.doesNotMatch(prompt, /\[pacing\]/);
+  assert.doesNotMatch(prompt, /at most 1 items/);
 });
 
 test("parseCommandArgs handles explicit path args, leaves task text alone, and rejects task args", () => {
